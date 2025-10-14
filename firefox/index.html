@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SafariBooks Downloader</title>
+    <link rel="stylesheet" href="index.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>SafariBooks Downloader</h1>
+        <p>Port of <code>safaribooks.py</code> for Chrome. Make sure you are signed in to O'Reilly in this profile.</p>
+      </header>
+      <section class="controls">
+        <form id="download-form">
+          <label class="field">
+            <span>Book ID</span>
+            <input id="book-id" name="bookId" type="text" required placeholder="9780135262047" />
+          </label>
+          <label class="field">
+            <span>Theme</span>
+            <select id="theme" name="theme">
+              <option value="none">Native</option>
+              <option value="white">White</option>
+              <option value="sepia">Sepia</option>
+              <option value="black">Black</option>
+            </select>
+          </label>
+          <label class="field checkbox">
+            <input id="kindle" type="checkbox" />
+            <span>Add Kindle compatibility tweaks</span>
+          </label>
+          <div class="buttons">
+            <button id="start-download" type="submit">Verify Session &amp; Download</button>
+          </div>
+        </form>
+      </section>
+      <section class="log-container">
+        <h2>Activity</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script type="module" src="index.js"></script>
+  </body>
+</html>
