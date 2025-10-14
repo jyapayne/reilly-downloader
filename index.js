@@ -23,6 +23,41 @@ function setDisabled(disabled) {
   kindleCheckbox.disabled = disabled;
 }
 
+function extractBookIdFromUrl(url) {
+  try {
+    const { pathname } = new URL(url);
+    const segments = pathname.split("/").filter(Boolean).reverse();
+    return segments.find((segment) => /^[0-9]{9,}$/.test(segment)) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function detectActiveBook() {
+  if (!chrome.tabs?.query) {
+    return;
+  }
+
+  try {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab?.url || !activeTab.url.includes("/library/view/")) {
+      return;
+    }
+
+    const detectedBookId = extractBookIdFromUrl(activeTab.url);
+    if (!detectedBookId) {
+      return;
+    }
+
+    if (bookIdInput.value !== detectedBookId) {
+      bookIdInput.value = detectedBookId;
+      appendLog(`Detected book ID ${detectedBookId} from the active tab.`);
+    }
+  } catch (error) {
+    console.warn("SafariBooks Downloader: unable to detect active book.", error);
+  }
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const bookId = bookIdInput.value.trim();
@@ -48,3 +83,5 @@ form.addEventListener("submit", async (event) => {
     setDisabled(false);
   }
 });
+
+detectActiveBook();

@@ -539,14 +539,83 @@ export class SafariBooksDownloader {
 
   async fetchImages() {
     for (const [relative, url] of this.imageDownloads.entries()) {
-      const response = await fetch(url, { credentials: "include" });
-      if (!response.ok) {
-        this.log(`Warning: unable to fetch image ${url} (status ${response.status})`);
+      const result = await this.fetchImageWithFallback(relative, url);
+      if (result) {
+        this.imageDownloads.set(relative, result);
+      }
+    }
+  }
+
+  async fetchImageWithFallback(relative, primaryUrl) {
+    const attempts = [];
+    const tried = new Set();
+
+    const queue = [primaryUrl, ...this.buildImageFallbackUrls(relative, primaryUrl)];
+    for (const candidate of queue) {
+      if (!candidate || tried.has(candidate)) {
         continue;
       }
-      const data = new Uint8Array(await response.arrayBuffer());
-      this.imageDownloads.set(relative, { data, sourceUrl: url });
+      tried.add(candidate);
+      try {
+        const response = await fetch(candidate, { credentials: "include" });
+        if (!response.ok) {
+          attempts.push(`${candidate} (status ${response.status})`);
+          continue;
+        }
+        const data = new Uint8Array(await response.arrayBuffer());
+        if (candidate !== primaryUrl) {
+          this.log(`Info: fetched image ${relative} via fallback ${candidate}`);
+        }
+        return { data, sourceUrl: candidate };
+      } catch (error) {
+        attempts.push(`${candidate} (${error.message})`);
+      }
     }
+
+    if (attempts.length) {
+      this.log(
+        `Warning: unable to fetch image ${primaryUrl}. Attempts: ${attempts.join("; ")}`
+      );
+    }
+    return null;
+  }
+
+  buildImageFallbackUrls(relative, url) {
+    const candidates = new Set();
+
+    if (url.includes("/Images/")) {
+      candidates.add(url.replace("/Images/", "/images/"));
+    }
+    if (url.includes("/images/")) {
+      candidates.add(url.replace("/images/", "/Images/"));
+    }
+
+    if (url.includes("/files/Images/")) {
+      const base = url.replace(/Images\/[^/]*$/i, "Images/");
+      ["cover.jpg", "cover.jpeg", "cover.png", "cover-large.jpg"].forEach((file) => {
+        candidates.add(`${base}${file}`);
+      });
+    }
+
+    const isbnMatch = url.match(/Images\/(\d{10,13})\.(jpg|jpeg|png|gif)$/i);
+    if (isbnMatch) {
+      const isbn = isbnMatch[1];
+      const sizes = ["600w", "400w", "250w", ""];
+      sizes.forEach((size) => {
+        const trimmedSize = size ? `/${size}` : "";
+        candidates.add(`https://learning.oreilly.com/library/cover/${isbn}${trimmedSize}/`);
+      });
+    }
+
+    if (this.bookInfo?.cover && url !== this.bookInfo.cover) {
+      candidates.add(this.bookInfo.cover);
+    }
+
+    if (relative && this.bookInfo?.cover_url) {
+      candidates.add(this.bookInfo.cover_url);
+    }
+
+    return Array.from(candidates).filter(Boolean);
   }
 
   async fetchCssImages() {

@@ -32,7 +32,8 @@
   "permissions": [
     "downloads",
     "cookies",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "https://learning.oreilly.com/*",
