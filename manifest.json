@@ -13,13 +13,6 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "offscreen": {
-    "page": "offscreen.html",
-    "reasons": [
-      "DOM_PARSER"
-    ],
-    "justification": "Parse book HTML to build EPUB files in a DOM-enabled context"
-  },
   "action": {
     "default_title": "SafariBooks Downloader",
     "default_popup": "index.html",
