@@ -3,10 +3,32 @@
   "name": "Reilly SafariBooks Downloader",
   "description": "Download O'Reilly learning content as EPUB files using a port of safaribooks.py.",
   "version": "0.1.0",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "offscreen": {
+    "page": "offscreen.html",
+    "reasons": [
+      "DOM_PARSER"
+    ],
+    "justification": "Parse book HTML to build EPUB files in a DOM-enabled context"
+  },
   "action": {
     "default_title": "SafariBooks Downloader",
     "default_popup": "index.html"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://learning.oreilly.com/library/view/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
   "permissions": [
     "downloads",
     "cookies",
