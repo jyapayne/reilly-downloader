@@ -44,3 +44,7 @@ export async function collectSessionCookies() {
     cookies: jar
   };
 }
+
+export function updateRequestContext() {
+  // Chrome/Edge do not require extra request header handling.
+}
