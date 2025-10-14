@@ -14,6 +14,7 @@ import {
   isLikelyImageAsset
 } from "./utils.js";
 import { SimpleZip } from "./zip.js";
+import { collectSessionCookies, updateRequestContext } from "./cookies.js";
 
 const SAFARI_BASE_URL = "https://learning.oreilly.com";
 const API_V2_TEMPLATE = `${SAFARI_BASE_URL}/api/v2/epubs/urn:orm:book:`;
@@ -31,25 +32,6 @@ const KINDLE_CSS =
   "#sbo-rt-content *{word-wrap:break-word!important;word-break:break-word!important;}" +
   "#sbo-rt-content table,#sbo-rt-content pre{overflow-x:unset!important;overflow:unset!important;" +
   "overflow-y:unset!important;white-space:pre-wrap!important;}";
-
-function downloadWithWebExtensionsApi(options) {
-  if (typeof browser !== "undefined" && browser?.downloads?.download) {
-    return browser.downloads.download(options);
-  }
-  if (typeof chrome !== "undefined" && chrome?.downloads?.download) {
-    return new Promise((resolve, reject) => {
-      chrome.downloads.download(options, (downloadId) => {
-        const err = chrome.runtime?.lastError;
-        if (err) {
-          reject(new Error(err.message));
-        } else {
-          resolve(downloadId);
-        }
-      });
-    });
-  }
-  return Promise.reject(new Error("Downloads API is not available in this browser."));
-}
 
 function formatTwoDigits(value) {
   return value.toString().padStart(2, "0");
@@ -113,6 +95,12 @@ export class SafariBooksDownloader {
     this.coverPath = "";
     this.themeMode = "white";
     this.options = { theme: "none", kindle: false };
+    this.referrerUrl = SAFARI_BASE_URL;
+    this.baseRequestSpacingMs = 200;
+    this.nextRequestTime = Date.now();
+    this.rateLimitPenaltyMs = 0;
+    this.sessionRefreshCooldownMs = 30000;
+    this.lastSessionRefresh = 0;
 
     this.cssSources = [];
     this.cssFilenameMap = new Map();
@@ -124,6 +112,167 @@ export class SafariBooksDownloader {
     this.imagesFromLinks = new Set();
   }
 
+  getReferrerUrl() {
+    return this.referrerUrl || SAFARI_BASE_URL;
+  }
+
+  updateReferrer(url) {
+    if (typeof url === "string" && url.startsWith("http")) {
+      this.referrerUrl = url;
+    }
+  }
+
+  async ensureSessionRefreshed({ force = false } = {}) {
+    if (typeof collectSessionCookies !== "function") {
+      return;
+    }
+    const now = Date.now();
+    if (!force && now - this.lastSessionRefresh < this.sessionRefreshCooldownMs) {
+      return;
+    }
+    try {
+      await collectSessionCookies();
+      this.lastSessionRefresh = Date.now();
+    } catch (error) {
+      this.log(`Warning: unable to refresh session cookies (${error.message}).`);
+    }
+  }
+
+  async applyRateLimit() {
+    const waitTime = this.nextRequestTime - Date.now();
+    if (waitTime > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+    }
+  }
+
+  registerRequestOutcome(status) {
+    const penalizedStatuses = new Set([0, 401, 403, 429, 500, 502, 503, 504]);
+    if (penalizedStatuses.has(status)) {
+      if (status === 429 || status === 503) {
+        this.rateLimitPenaltyMs = Math.min(Math.max(this.rateLimitPenaltyMs * 2, 500), 8000);
+      } else {
+        this.rateLimitPenaltyMs = Math.min(this.rateLimitPenaltyMs + 250, 6000);
+      }
+    } else {
+      this.rateLimitPenaltyMs = Math.max(Math.floor(this.rateLimitPenaltyMs * 0.5), 0);
+    }
+    const delay = this.baseRequestSpacingMs + this.rateLimitPenaltyMs;
+    this.nextRequestTime = Date.now() + delay;
+  }
+
+  shouldRetryResponse(response, attempt, maxAttempts, options = {}) {
+    if (attempt >= maxAttempts - 1) {
+      return false;
+    }
+    const status = response?.status ?? 0;
+    if (status === 0) {
+      return true;
+    }
+    if ([429, 500, 502, 503, 504].includes(status)) {
+      return true;
+    }
+    if ((status === 401 || status === 403) && options.retryOnForbidden !== false) {
+      return true;
+    }
+    return false;
+  }
+
+  computeRetryDelay(response, attempt, options = {}) {
+    const status = response?.status ?? 0;
+    const base = options.baseRetryDelay ?? 750;
+    const cap = options.maxRetryDelay ?? 8000;
+    const growth = Math.min(cap, base * Math.pow(2, attempt));
+    const jitter = Math.random() * 250;
+    if (status === 429 || status === 503) {
+      return Math.min(cap, growth + 1000 + jitter);
+    }
+    return Math.min(cap, growth + jitter);
+  }
+
+  buildFetchInit(init = {}, { requireDocument = false } = {}) {
+    const { headers, ...rest } = init || {};
+    const mergedHeaders = new Headers(headers || {});
+    if (!mergedHeaders.has("X-Requested-With")) {
+      mergedHeaders.set("X-Requested-With", "XMLHttpRequest");
+    }
+    if (requireDocument && !mergedHeaders.has("Accept")) {
+      mergedHeaders.set(
+        "Accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      );
+    }
+    if (!mergedHeaders.has("Accept-Language")) {
+      mergedHeaders.set("Accept-Language", "en-US,en;q=0.9");
+    }
+
+    const initWithDefaults = {
+      credentials: "include",
+      mode: "cors",
+      ...rest,
+      headers: mergedHeaders
+    };
+
+    if (!initWithDefaults.referrer) {
+      initWithDefaults.referrer = this.getReferrerUrl();
+    }
+    if (!initWithDefaults.referrerPolicy) {
+      initWithDefaults.referrerPolicy = "strict-origin-when-cross-origin";
+    }
+    return initWithDefaults;
+  }
+
+  async fetchWithSession(url, init = {}, options = {}) {
+    const maxAttempts = Math.max(1, options.maxAttempts ?? 4);
+    let lastError = null;
+    let lastResponse = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await this.applyRateLimit();
+
+      try {
+        const response = await fetch(url, this.buildFetchInit(init, options));
+        lastResponse = response;
+        this.registerRequestOutcome(response.status);
+
+        if (response.ok) {
+          return response;
+        }
+
+        const shouldRetry = this.shouldRetryResponse(response, attempt, maxAttempts, options);
+        if (!shouldRetry) {
+          return response;
+        }
+
+        if ((response.status === 401 || response.status === 403) && options.retryOnForbidden !== false) {
+          await this.ensureSessionRefreshed({ force: true });
+        }
+
+        const retryDelay = this.computeRetryDelay(response, attempt, options);
+        const targetTime = Date.now() + retryDelay;
+        if (targetTime > this.nextRequestTime) {
+          this.nextRequestTime = targetTime;
+        }
+      } catch (error) {
+        lastError = error;
+        this.registerRequestOutcome(0);
+        if (attempt >= maxAttempts - 1) {
+          throw error;
+        }
+
+        const retryDelay = this.computeRetryDelay(null, attempt, options);
+        const targetTime = Date.now() + retryDelay;
+        if (targetTime > this.nextRequestTime) {
+          this.nextRequestTime = targetTime;
+        }
+      }
+    }
+
+    if (lastResponse) {
+      return lastResponse;
+    }
+    throw lastError ?? new Error(`Request to ${url} failed without a response.`);
+  }
+
   async download(bookId, options = {}) {
     this.reset();
     this.bookId = bookId;
@@ -132,6 +281,8 @@ export class SafariBooksDownloader {
       kindle: Boolean(options.kindle)
     };
     this.themeMode = this.options.theme === "none" ? "white" : this.options.theme;
+    this.updateReferrer(`${SAFARI_BASE_URL}/library/view/${this.bookId}/`);
+    updateRequestContext({ referer: this.getReferrerUrl() });
 
     this.log(`Verifying session by loading profile page...`);
     await this.checkLogin();
@@ -139,6 +290,8 @@ export class SafariBooksDownloader {
     this.log(`Retrieving book metadata for ${bookId}...`);
     this.bookInfo = await this.fetchBookInfo(bookId);
     this.baseUrl = this.bookInfo.web_url || this.bookInfo.url;
+    this.updateReferrer(this.bookInfo.web_url || this.bookInfo.url);
+    updateRequestContext({ referer: this.getReferrerUrl() });
     this.cleanTitle = makeFolderFriendlyName(this.bookInfo.title, this.bookId);
     const authorNames = (this.bookInfo.authors || []).map((author) => author.name).filter(Boolean);
     this.primaryAuthors = authorNames.join(", ") || "Unknown Author";
@@ -161,12 +314,12 @@ export class SafariBooksDownloader {
     const url = URL.createObjectURL(blob);
 
     const filename = `${this.cleanTitle}/${this.outputFileName}.epub`;
-    await downloadWithWebExtensionsApi({ url, filename, saveAs: false });
+    await chrome.downloads.download({ url, filename, saveAs: false });
     this.log(`EPUB saved as ${filename}`);
   }
 
   async checkLogin() {
-    const response = await fetch(PROFILE_URL, { credentials: "include" });
+    const response = await this.fetchWithSession(PROFILE_URL, {}, { requireDocument: true });
     if (!response.ok) {
       throw new Error(`Authentication failed (status ${response.status}) when accessing ${PROFILE_URL}`);
     }
@@ -210,7 +363,11 @@ export class SafariBooksDownloader {
   }
 
   async fetchJson(url) {
-    const response = await fetch(url, { credentials: "include" });
+    const response = await this.fetchWithSession(url, {
+      headers: {
+        Accept: "application/json, text/plain, */*"
+      }
+    });
     if (!response.ok) {
       throw new Error(`Request to ${url} failed with status ${response.status}`);
     }
@@ -380,7 +537,15 @@ export class SafariBooksDownloader {
   }
 
   async loadChapterDocument(url) {
-    const response = await fetch(url, { credentials: "include" });
+    const response = await this.fetchWithSession(
+      url,
+      {
+        headers: {
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+      },
+      { requireDocument: true }
+    );
     if (!response.ok) {
       throw new Error(`Failed to download chapter at ${url} (status ${response.status})`);
     }
@@ -500,7 +665,11 @@ export class SafariBooksDownloader {
       if (this.cssContentMap.has(source)) {
         continue;
       }
-      const response = await fetch(source, { credentials: "include" });
+      const response = await this.fetchWithSession(source, {
+        headers: {
+          Accept: "text/css,*/*;q=0.1"
+        }
+      });
       if (!response.ok) {
         this.log(`Warning: unable to retrieve CSS from ${source} (status ${response.status})`);
         continue;
@@ -546,7 +715,11 @@ export class SafariBooksDownloader {
       if (this.cssImageDownloads.has(localPath)) {
         continue;
       }
-      const response = await fetch(url, { credentials: "include" });
+      const response = await this.fetchWithSession(url, {
+        headers: {
+          Accept: "font/woff2,application/font-woff,application/octet-stream,*/*"
+        }
+      });
       if (!response.ok) {
         this.log(`Warning: unable to retrieve font ${url} (status ${response.status})`);
         continue;
@@ -576,7 +749,11 @@ export class SafariBooksDownloader {
       }
       tried.add(candidate);
       try {
-        const response = await fetch(candidate, { credentials: "include" });
+        const response = await this.fetchWithSession(candidate, {
+          headers: {
+            Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+          }
+        });
         if (!response.ok) {
           attempts.push(`${candidate} (status ${response.status})`);
           continue;
@@ -642,7 +819,11 @@ export class SafariBooksDownloader {
       if (entry?.data) {
         continue;
       }
-      const response = await fetch(entry, { credentials: "include" });
+      const response = await this.fetchWithSession(entry, {
+        headers: {
+          Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        }
+      });
       if (!response.ok) {
         this.log(`Warning: unable to fetch CSS image ${entry} (status ${response.status})`);
         continue;

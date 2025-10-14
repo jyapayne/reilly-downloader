@@ -43,6 +43,8 @@
     "cookies",
     "tabs",
     "storage",
+    "webRequest",
+    "webRequestBlocking",
     "https://learning.oreilly.com/*",
     "https://www.oreilly.com/*",
     "https://api.oreilly.com/*"
