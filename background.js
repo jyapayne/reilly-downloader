@@ -8,6 +8,22 @@ let contextReadyPromise = null;
 let contextReadyResolver = null;
 let preferWindowContext = true;
 
+function forwardProgressToClient(pending, message) {
+  if (!pending || pending.tabId == null) {
+    return;
+  }
+  const payload = {
+    type: "download-progress",
+    requestId: message.requestId,
+    payload: message.payload
+  };
+  if (pending.frameId != null) {
+    chrome.tabs.sendMessage(pending.tabId, payload, { frameId: pending.frameId }).catch(() => {});
+  } else {
+    chrome.tabs.sendMessage(pending.tabId, payload).catch(() => {});
+  }
+}
+
 function createReadyPromise() {
   contextReadyPromise = new Promise((resolve) => {
     contextReadyResolver = resolve;
@@ -147,7 +163,7 @@ function shouldRetryInWindow(error, pending) {
   return message.toLowerCase().includes("domparser");
 }
 
-async function startDownloadTask(bookId, options, sendResponse, attempt = 0) {
+async function startDownloadTask(bookId, options, sendResponse, attempt = 0, clientInfo = {}) {
   try {
     await ensureDocumentContext();
   } catch (error) {
@@ -157,7 +173,31 @@ async function startDownloadTask(bookId, options, sendResponse, attempt = 0) {
 
   const requestId = crypto.randomUUID();
   const contextMode = executionContext.mode ?? (preferWindowContext ? "window" : "offscreen");
-  pendingResponses.set(requestId, { sendResponse, bookId, options, attempt, contextMode });
+  const tabId = typeof clientInfo.tabId === "number" ? clientInfo.tabId : null;
+  const frameId = typeof clientInfo.frameId === "number" ? clientInfo.frameId : null;
+
+  const pendingEntry = {
+    sendResponse,
+    bookId,
+    options,
+    attempt,
+    contextMode,
+    tabId,
+    frameId,
+    clientInfo
+  };
+
+  pendingResponses.set(requestId, pendingEntry);
+
+  if (tabId != null) {
+    forwardProgressToClient(pendingEntry, {
+      requestId,
+      payload: {
+        stage: "starting",
+        bookId
+      }
+    });
+  }
 
   try {
     await chrome.runtime.sendMessage({
@@ -189,7 +229,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       kindle: Boolean(message.kindle)
     };
 
-    startDownloadTask(bookId, options, sendResponse);
+    const clientInfo = {
+      tabId: sender?.tab?.id ?? null,
+      frameId: typeof sender?.frameId === "number" ? sender.frameId : null
+    };
+
+    startDownloadTask(bookId, options, sendResponse, 0, clientInfo);
     return true;
   }
 
@@ -212,7 +257,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch(() => {})
         .finally(() => {
           resetContextState();
-          startDownloadTask(pending.bookId, pending.options, pending.sendResponse, pending.attempt + 1);
+          startDownloadTask(
+            pending.bookId,
+            pending.options,
+            pending.sendResponse,
+            pending.attempt + 1,
+            pending.clientInfo || {}
+          );
         });
       return false;
     }
@@ -220,6 +271,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     pendingResponses.delete(requestId);
     pending.sendResponse({ ok, error });
     cleanupWindowIfIdle();
+    return false;
+  }
+
+  if (message?.type === "offscreen-download-progress") {
+    const { requestId } = message;
+    const pending = requestId ? pendingResponses.get(requestId) : null;
+    if (pending) {
+      forwardProgressToClient(pending, message);
+    }
     return false;
   }
 

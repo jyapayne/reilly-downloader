@@ -3,7 +3,19 @@ import { collectSessionCookies } from "./safaribooks/cookies.js";
 
 const downloader = new SafariBooksDownloader((message) => {
   console.info(`[SafariBooksDownloader] ${message}`);
+}, (payload) => {
+  try {
+    chrome.runtime.sendMessage({
+      type: "offscreen-download-progress",
+      requestId: currentRequestId,
+      payload
+    });
+  } catch (_) {
+    // ignore communication errors
+  }
 });
+
+let currentRequestId = null;
 
 async function handleOffscreenDownload(message) {
   const { requestId, bookId, options = {} } = message;
@@ -18,6 +30,7 @@ async function handleOffscreenDownload(message) {
   }
 
   try {
+    currentRequestId = requestId;
     await collectSessionCookies();
     await downloader.download(bookId, {
       theme: options.theme ?? "none",
@@ -36,6 +49,7 @@ async function handleOffscreenDownload(message) {
       error: error.message
     });
   }
+  currentRequestId = null;
 }
 
 chrome.runtime.onMessage.addListener((message) => {

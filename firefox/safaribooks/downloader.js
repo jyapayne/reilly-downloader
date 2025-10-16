@@ -33,6 +33,10 @@ const KINDLE_CSS =
   "#sbo-rt-content table,#sbo-rt-content pre{overflow-x:unset!important;overflow:unset!important;" +
   "overflow-y:unset!important;white-space:pre-wrap!important;}";
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(ms, 0)));
+}
+
 function formatTwoDigits(value) {
   return value.toString().padStart(2, "0");
 }
@@ -75,11 +79,12 @@ function toAbsoluteUrl(link, base) {
 }
 
 export class SafariBooksDownloader {
-  constructor(log = console.log) {
+  constructor(log = console.log, onProgress) {
     this.log = (message) => {
       const timestamp = new Date().toISOString();
       log(`[${timestamp}] ${message}`);
     };
+    this.onProgress = typeof onProgress === "function" ? onProgress : null;
     this.reset();
   }
 
@@ -110,6 +115,19 @@ export class SafariBooksDownloader {
     this.imageDownloads = new Map(); // relative path -> absolute url
     this.cssImageDownloads = new Map(); // path within Styles -> absolute url
     this.imagesFromLinks = new Set();
+
+    this.reportProgress("reset", { message: "Preparing download..." });
+  }
+
+  reportProgress(stage, data = {}) {
+    if (typeof this.onProgress !== "function") {
+      return;
+    }
+    try {
+      this.onProgress({ stage, bookId: this.bookId, ...data });
+    } catch (error) {
+      console.warn("SafariBooksDownloader progress callback error", error);
+    }
   }
 
   getReferrerUrl() {
@@ -141,7 +159,7 @@ export class SafariBooksDownloader {
   async applyRateLimit() {
     const waitTime = this.nextRequestTime - Date.now();
     if (waitTime > 0) {
-      await new Promise((resolve) => setTimeout(resolve, waitTime));
+      await sleep(waitTime);
     }
   }
 
@@ -179,8 +197,8 @@ export class SafariBooksDownloader {
 
   computeRetryDelay(response, attempt, options = {}) {
     const status = response?.status ?? 0;
-    const base = options.baseRetryDelay ?? 750;
-    const cap = options.maxRetryDelay ?? 8000;
+    const base = options.baseRetryDelay ?? 200;
+    const cap = options.maxRetryDelay ?? 2000;
     const growth = Math.min(cap, base * Math.pow(2, attempt));
     const jitter = Math.random() * 250;
     if (status === 429 || status === 503) {
@@ -284,11 +302,18 @@ export class SafariBooksDownloader {
     this.updateReferrer(`${SAFARI_BASE_URL}/library/view/${this.bookId}/`);
     updateRequestContext({ referer: this.getReferrerUrl() });
 
+    this.reportProgress("starting", { bookId: this.bookId });
     this.log(`Verifying session by loading profile page...`);
+    this.reportProgress("session-check");
     await this.checkLogin();
+    this.reportProgress("session-ok");
 
     this.log(`Retrieving book metadata for ${bookId}...`);
     this.bookInfo = await this.fetchBookInfo(bookId);
+    this.reportProgress("metadata", {
+      title: this.bookInfo.title,
+      authors: (this.bookInfo.authors || []).map((author) => author.name).filter(Boolean)
+    });
     this.baseUrl = this.bookInfo.web_url || this.bookInfo.url;
     this.updateReferrer(this.bookInfo.web_url || this.bookInfo.url);
     updateRequestContext({ referer: this.getReferrerUrl() });
@@ -298,24 +323,70 @@ export class SafariBooksDownloader {
     this.outputFileName = makeFileFriendlyName(this.bookInfo.title, this.primaryAuthors, this.bookId);
 
     this.log(`Fetching table of chapters...`);
+    this.reportProgress("chapters-fetch");
     this.bookChapters = await this.fetchChapters(this.bookInfo.chapters);
     this.log(`Chapters discovered: ${this.bookChapters.length}`);
+    this.reportProgress("chapters-discovered", { total: this.bookChapters.length });
 
     await this.processChapters();
+    this.reportProgress("chapters-complete", { total: this.chapterDocuments.length });
 
+    const cssSourceCount = this.cssSources.length;
+    this.log(
+      cssSourceCount
+        ? `Fetching ${cssSourceCount} stylesheet source${cssSourceCount === 1 ? "" : "s"}...`
+        : "No external stylesheet sources to fetch."
+    );
+    this.reportProgress("styles-start", { total: cssSourceCount });
     await this.fetchCssSources();
+    this.reportProgress("styles-complete", { total: this.cssContentMap.size });
+
+    const fontCount = this.fontDownloads.size;
+    this.log(
+      fontCount
+        ? `Fetching ${fontCount} font asset${fontCount === 1 ? "" : "s"}...`
+        : "No font assets to fetch."
+    );
+    this.reportProgress("fonts-start", { total: fontCount });
     await this.fetchFonts();
+    this.reportProgress("fonts-complete", { total: this.fontDownloads.size });
+
+    const totalImages = Array.from(this.imageDownloads.values()).filter((value) => value).length;
+    const pendingImages = Array.from(this.imageDownloads.values()).filter((value) => !value?.data).length;
+    this.log(
+      pendingImages
+        ? `Fetching ${pendingImages} image asset${pendingImages === 1 ? "" : "s"} (registered: ${totalImages})...`
+        : "No image assets to fetch."
+    );
     await this.fetchImages();
+
+    const cssImageTotal = this.cssImageDownloads.size;
+    this.log(
+      cssImageTotal
+        ? `Fetching ${cssImageTotal} CSS-linked asset${cssImageTotal === 1 ? "" : "s"}...`
+        : "No CSS-linked assets to fetch."
+    );
+    this.reportProgress("css-images-start", { total: cssImageTotal });
     await this.fetchCssImages();
+    this.reportProgress("css-images-complete", { total: cssImageTotal });
 
     const zip = await this.assembleEpub();
 
-    const blob = new Blob([zip.generate()], { type: "application/epub+zip" });
+    this.log("Packaging EPUB zip contents...");
+    const zipStart = Date.now();
+    const zipData = zip.generate();
+    const zipDuration = Date.now() - zipStart;
+    this.log(`EPUB archive generated in ${zipDuration}ms. Preparing download...`);
+    this.reportProgress("packaging-complete", { durationMs: zipDuration });
+
+    const blob = new Blob([zipData], { type: "application/epub+zip" });
     const url = URL.createObjectURL(blob);
 
     const filename = `${this.cleanTitle}/${this.outputFileName}.epub`;
+    this.reportProgress("download-start", { filename });
     await chrome.downloads.download({ url, filename, saveAs: false });
     this.log(`EPUB saved as ${filename}`);
+    this.reportProgress("complete", { filename });
   }
 
   async checkLogin() {
@@ -434,7 +505,7 @@ export class SafariBooksDownloader {
       : normalized.split("/").slice(-1)[0];
     let trimmed = relCandidate.replace(/^\/+/, "");
     for (const dir of imageDirs) {
-      if (trimmed.startsWith(dir)) {
+      if (trimmed.toLowerCase().startsWith(dir)) {
         trimmed = trimmed.slice(dir.length);
         break;
       }
@@ -475,6 +546,17 @@ export class SafariBooksDownloader {
       const chapter = this.bookChapters[index];
       const filename = this.getChapterFilename(chapter).replace(".html", ".xhtml");
       const assets = chapter.related_assets || {};
+      const chapterTitle = chapter.title || `Chapter ${index + 1}`;
+
+      this.log(
+        `Loading chapter ${index + 1}/${this.bookChapters.length}: ${chapterTitle}`
+      );
+      const chapterFetchStart = Date.now();
+      this.reportProgress("chapter-start", {
+        index: index + 1,
+        total: this.bookChapters.length,
+        title: chapterTitle
+      });
 
       if (Array.isArray(assets.images)) {
         assets.images.forEach((img) => {
@@ -496,8 +578,35 @@ export class SafariBooksDownloader {
       }
 
       const htmlRoot = await this.loadChapterDocument(chapter.content_url);
+      const fetchDurationMs = Date.now() - chapterFetchStart;
+      this.log(
+        `Fetched chapter ${index + 1}/${this.bookChapters.length} in ${fetchDurationMs}ms`
+      );
+      this.reportProgress("chapter-fetched", {
+        index: index + 1,
+        total: this.bookChapters.length,
+        title: chapterTitle,
+        durationMs: fetchDurationMs
+      });
+      const chapterParseStart = Date.now();
       const firstPage = index === 0;
-      const { cssMarkup, xhtml, detectedCover } = this.parseHtml(htmlRoot, chapterStyles, firstPage);
+      const { cssMarkup, xhtml, detectedCover, pageCount } = this.parseHtml(
+        htmlRoot,
+        chapterStyles,
+        firstPage
+      );
+      const parseDurationMs = Date.now() - chapterParseStart;
+      const pageCountLabel = typeof pageCount === "number" ? pageCount : "unknown";
+      this.log(
+        `Processed chapter ${index + 1}/${this.bookChapters.length}: ${chapterTitle} (pages detected: ${pageCountLabel}) in ${parseDurationMs}ms`
+      );
+      this.reportProgress("chapter-processed", {
+        index: index + 1,
+        total: this.bookChapters.length,
+        title: chapterTitle,
+        durationMs: parseDurationMs,
+        pages: pageCountLabel
+      });
       if (detectedCover && !this.coverPath) {
         const coverRegistered = this.registerImage(detectedCover);
         if (coverRegistered) {
@@ -595,6 +704,28 @@ export class SafariBooksDownloader {
       detectedCover = this.detectCoverImage(bookContent);
     }
 
+    const pageSelectors = [
+      "[data-type='page']",
+      "[data-role='page']",
+      "[data-page-number]",
+      "[data-page]",
+      "[role='doc-pagebreak']",
+      "[epub\\:type='pagebreak']",
+      ".sbo-page"
+    ];
+    const pageElements = new Set();
+    for (const selector of pageSelectors) {
+      try {
+        bookContent.querySelectorAll(selector).forEach((element) => pageElements.add(element));
+      } catch (_) {
+        // ignore selectors not supported in this document
+      }
+    }
+    if (pageElements.size === 0) {
+      bookContent.querySelectorAll(".page").forEach((element) => pageElements.add(element));
+    }
+    const pageCount = pageElements.size > 0 ? pageElements.size : null;
+
     const serializer = new XMLSerializer();
     const xhtml = serializer.serializeToString(bookContent);
     const documentHtml = buildXhtml(
@@ -608,7 +739,8 @@ export class SafariBooksDownloader {
     return {
       cssMarkup: pageCssBlocks.join("\n"),
       xhtml: documentHtml,
-      detectedCover
+      detectedCover,
+      pageCount
     };
   }
 
@@ -730,12 +862,60 @@ export class SafariBooksDownloader {
   }
 
   async fetchImages() {
-    for (const [relative, url] of this.imageDownloads.entries()) {
-      const result = await this.fetchImageWithFallback(relative, url);
-      if (result) {
-        this.imageDownloads.set(relative, result);
+    const pendingEntries = Array.from(this.imageDownloads.entries()).filter(([, entry]) => {
+      if (!entry) {
+        return true;
       }
+      return !entry.data;
+    });
+
+    if (!pendingEntries.length) {
+      this.reportProgress("images-complete", { total: 0, completed: 0 });
+      return;
     }
+
+    const total = pendingEntries.length;
+    const maxConcurrency = this.options?.imageConcurrency ?? 10;
+    const concurrency = Math.min(Math.max(1, maxConcurrency), total);
+    const startTime = Date.now();
+    let completed = 0;
+
+    this.reportProgress("images-start", { total, concurrency });
+
+    const worker = async () => {
+      while (pendingEntries.length) {
+        const nextEntry = pendingEntries.pop();
+        if (!nextEntry) {
+          return;
+        }
+        const [relative, value] = nextEntry;
+        const primaryUrl = typeof value === "string" ? value : value?.sourceUrl;
+        if (!primaryUrl) {
+          completed += 1;
+          continue;
+        }
+        const result = await this.fetchImageWithFallback(relative, primaryUrl);
+        if (result) {
+          this.imageDownloads.set(relative, result);
+        }
+        completed += 1;
+        if (completed === total || completed % 25 === 0) {
+          const elapsedSeconds = Math.round((Date.now() - startTime) / 1000);
+          this.log(
+            `Fetched ${completed}/${total} image assets (${elapsedSeconds}s elapsed)`
+          );
+          this.reportProgress("images-progress", {
+            completed,
+            total,
+            elapsedSeconds
+          });
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: concurrency }).map(() => worker()));
+    const totalDurationMs = Date.now() - startTime;
+    this.reportProgress("images-complete", { total, completed: total, durationMs: totalDurationMs });
   }
 
   async fetchImageWithFallback(relative, primaryUrl) {

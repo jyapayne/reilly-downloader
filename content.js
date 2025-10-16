@@ -103,30 +103,68 @@
     return button;
   }
 
-  function handleDownload(button, bookId) {
+  function setButtonState(button, state, message) {
+    if (!button) {
+      return;
+    }
+    switch (state) {
+      case "busy":
+        button.disabled = true;
+        button.style.opacity = "0.7";
+        break;
+      case "idle":
+        button.disabled = false;
+        button.style.opacity = "";
+        break;
+      case "error":
+        button.disabled = false;
+        button.style.opacity = "";
+        break;
+      default:
+        break;
+    }
+    if (message) {
+      button.textContent = message;
+    }
+  }
+
+  function setProgressMessage(wrapper, message) {
+    if (!wrapper) {
+      return;
+    }
+    let status = wrapper.querySelector(".reilly-progress-status");
+    if (!status) {
+      return;
+    }
+    status.textContent = message;
+  }
+
+  function handleDownload(button, bookId, wrapper, frameId) {
     if (!bookId) {
       return;
     }
     const originalText = button.textContent;
-    button.disabled = true;
-    button.style.opacity = "0.7";
-    button.textContent = "Downloading…";
+    setButtonState(button, "busy", "Downloading…");
+    setProgressMessage(wrapper, "Starting download...");
 
-    chrome.runtime.sendMessage({ type: "downloadBook", bookId }, (response) => {
+    chrome.runtime.sendMessage({ type: "downloadBook", bookId, frameId }, (response) => {
       const error = chrome.runtime.lastError;
       if (error) {
         console.error("SafariBooks Downloader:", error);
-        button.textContent = "Failed (extension error)";
+        setButtonState(button, "error", "Failed (extension error)");
+        setProgressMessage(wrapper, "Failed: extension error.");
       } else if (response?.ok) {
-        button.textContent = "Download started";
+        setButtonState(button, "busy", "Download started");
+        setProgressMessage(wrapper, "Packaging and saving EPUB...");
       } else {
-        button.textContent = response?.error ? `Failed: ${response.error}` : "Download failed";
+        const errorMessage = response?.error ? `Failed: ${response.error}` : "Download failed";
+        setButtonState(button, "error", errorMessage);
+        setProgressMessage(wrapper, errorMessage);
       }
 
       setTimeout(() => {
         button.textContent = originalText;
-        button.disabled = false;
-        button.style.opacity = "";
+        setButtonState(button, "idle");
       }, response?.ok ? 2000 : 4000);
     });
   }
@@ -154,10 +192,6 @@
       return;
     }
 
-    const button = createButton();
-    button.dataset.bookId = bookId;
-    button.addEventListener("click", () => handleDownload(button, bookId));
-
     const wrapperId = `${BUTTON_ID}-wrapper`;
     let wrapper = document.getElementById(wrapperId);
     if (!wrapper) {
@@ -167,17 +201,132 @@
       wrapper.style.alignItems = "center";
       wrapper.style.gap = "12px";
       wrapper.style.marginLeft = "12px";
+
+      const button = createButton();
+      button.dataset.bookId = bookId;
+      button.addEventListener("click", () => handleDownload(button, bookId, wrapper));
+
       wrapper.appendChild(button);
+      const progressContainer = document.createElement("span");
+      progressContainer.className = "reilly-progress";
+      progressContainer.style.display = "inline-flex";
+      progressContainer.style.flexDirection = "column";
+      progressContainer.style.background = "#e2e8f0";
+      progressContainer.style.borderRadius = "4px";
+      progressContainer.style.padding = "6px 8px";
+      progressContainer.style.minWidth = "160px";
+      progressContainer.style.border = "1px solid #cbd5e1";
+      progressContainer.style.fontSize = "0.75rem";
+      progressContainer.style.color = "#1e293b";
+      progressContainer.style.lineHeight = "1.4";
+
+      const progressLabel = document.createElement("span");
+      progressLabel.textContent = "Progress";
+      progressLabel.style.fontSize = "0.7rem";
+      progressLabel.style.textTransform = "uppercase";
+      progressLabel.style.fontWeight = "700";
+      progressLabel.style.color = "#475569";
+      progressLabel.style.letterSpacing = "0.05em";
+
+      const progressStatus = document.createElement("span");
+      progressStatus.className = "reilly-progress-status";
+      progressStatus.textContent = "Waiting";
+
+      progressContainer.appendChild(progressLabel);
+      progressContainer.appendChild(progressStatus);
+      wrapper.appendChild(progressContainer);
 
       if (titleElement.parentElement) {
         titleElement.parentElement.insertBefore(wrapper, titleElement.nextSibling);
       } else {
         titleElement.insertAdjacentElement("afterend", wrapper);
       }
-    } else if (!wrapper.contains(button)) {
-      wrapper.appendChild(button);
+    } else {
+      const button = wrapper.querySelector(`#${BUTTON_ID}`) || createButton();
+      button.dataset.bookId = bookId;
+      if (!wrapper.contains(button)) {
+        wrapper.appendChild(button);
+      }
     }
   }
+
+  chrome.runtime.onMessage.addListener((message) => {
+    if (!message || message.type !== "download-progress") {
+      return;
+    }
+    const wrapper = document.getElementById(`${BUTTON_ID}-wrapper`);
+    if (!wrapper) {
+      return;
+    }
+    const button = wrapper.querySelector(`#${BUTTON_ID}`);
+    const { payload = {} } = message;
+    if (!payload.stage) {
+      return;
+    }
+    switch (payload.stage) {
+      case "starting":
+        setButtonState(button, "busy", "Preparing...");
+        setProgressMessage(wrapper, "Preparing download...");
+        break;
+      case "session-check":
+        setProgressMessage(wrapper, "Verifying session...");
+        break;
+      case "session-ok":
+        setProgressMessage(wrapper, "Session verified.");
+        break;
+      case "metadata":
+        setProgressMessage(wrapper, payload.title ? `Metadata: ${payload.title}` : "Metadata loaded.");
+        break;
+      case "chapters-discovered":
+        setProgressMessage(
+          wrapper,
+          `Chapters: ${payload.total ?? "?"}${payload.total === 1 ? "" : " chapters"}`
+        );
+        break;
+      case "chapter-start":
+        setProgressMessage(
+          wrapper,
+          `Chapter ${payload.index}/${payload.total}: ${payload.title || ""}`
+        );
+        break;
+      case "images-start":
+        setProgressMessage(
+          wrapper,
+          `Images: 0/${payload.total} (max ${payload.concurrency})`
+        );
+        break;
+      case "images-progress":
+        setProgressMessage(
+          wrapper,
+          `Images: ${payload.completed}/${payload.total} (${payload.elapsedSeconds ?? 0}s)`
+        );
+        break;
+      case "images-complete":
+        setProgressMessage(wrapper, `Images complete (${payload.completed})`);
+        break;
+      case "css-images-start":
+        setProgressMessage(wrapper, `CSS assets: ${payload.total}`);
+        break;
+      case "packaging-complete":
+        setProgressMessage(wrapper, `Packaging done (${payload.durationMs}ms)`);
+        break;
+      case "download-start":
+        setProgressMessage(wrapper, "Saving EPUB...");
+        break;
+      case "complete":
+        setButtonState(button, "idle", "Download Complete");
+        setProgressMessage(wrapper, "Download complete." );
+        setTimeout(() => {
+          if (button) {
+            button.textContent = "Download EPUB";
+          }
+          setProgressMessage(wrapper, "Waiting");
+        }, 4000);
+        break;
+      default:
+        break;
+    }
+  });
 
   function observeForTitle() {
     if (observerInstance) {

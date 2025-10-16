@@ -13,7 +13,6 @@ function appendLog(message) {
   logView.textContent += `[${timestamp}] ${message}\n`;
   logView.scrollTop = logView.scrollHeight;
 }
-
 const downloader = new SafariBooksDownloader(appendLog);
 
 function setDisabled(disabled) {

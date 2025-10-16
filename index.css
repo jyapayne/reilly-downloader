@@ -63,7 +63,7 @@ select {
   font-size: 0.9rem;
 }
 
-.buttons {
+.actions {
   display: flex;
 }
 
@@ -75,9 +75,6 @@ button {
   font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
-}
-
-button {
   background: #3a7bd5;
   color: #fff;
 }
