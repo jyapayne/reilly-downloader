@@ -43,109 +43,81 @@ export class SimpleZip {
   }
 
   generate() {
-    let size = 0;
-    for (const file of this.files) {
-      const localSize = 30 + file.nameBytes.length + file.data.length;
-      size += localSize;
-    }
-
-    const centralDirectoryOffset = size;
-    let centralDirectorySize = 0;
-    for (const file of this.files) {
-      centralDirectorySize += 46 + file.nameBytes.length;
-    }
-    size += centralDirectorySize + 22;
-
-    const output = new Uint8Array(size);
-    const view = new DataView(output.buffer);
+    const parts = [];
     let offset = 0;
 
     for (const file of this.files) {
+      const headerLength = 30 + file.nameBytes.length;
+      const headerBuffer = new ArrayBuffer(headerLength);
+      const headerView = new DataView(headerBuffer);
+
       file.localHeaderOffset = offset;
-      view.setUint32(offset, 0x04034b50, true);
-      offset += 4;
-      view.setUint16(offset, 20, true); // version needed to extract
-      offset += 2;
-      view.setUint16(offset, 0, true); // general purpose flag
-      offset += 2;
-      view.setUint16(offset, 0, true); // compression (store)
-      offset += 2;
-      view.setUint16(offset, 0, true); // mod time
-      offset += 2;
-      view.setUint16(offset, 0, true); // mod date
-      offset += 2;
-      view.setUint32(offset, file.crc, true);
-      offset += 4;
-      view.setUint32(offset, file.data.length, true);
-      offset += 4;
-      view.setUint32(offset, file.data.length, true);
-      offset += 4;
-      view.setUint16(offset, file.nameBytes.length, true);
-      offset += 2;
-      view.setUint16(offset, 0, true); // extra length
-      offset += 2;
-      output.set(file.nameBytes, offset);
-      offset += file.nameBytes.length;
-      output.set(file.data, offset);
-      offset += file.data.length;
+
+      headerView.setUint32(0, 0x04034b50, true);
+      headerView.setUint16(4, 20, true); // version needed to extract
+      headerView.setUint16(6, 0, true); // general purpose flag
+      headerView.setUint16(8, 0, true); // compression (store)
+      headerView.setUint16(10, 0, true); // mod time
+      headerView.setUint16(12, 0, true); // mod date
+      headerView.setUint32(14, file.crc, true);
+      headerView.setUint32(18, file.data.length, true);
+      headerView.setUint32(22, file.data.length, true);
+      headerView.setUint16(26, file.nameBytes.length, true);
+      headerView.setUint16(28, 0, true); // extra length
+
+      const headerBytes = new Uint8Array(headerBuffer);
+      headerBytes.set(file.nameBytes, 30);
+      parts.push(headerBytes, file.data);
+
+      offset += headerBytes.length + file.data.length;
     }
 
-    let centralOffset = centralDirectoryOffset;
+    const centralDirectoryOffset = offset;
+    let centralDirectorySize = 0;
+
     for (const file of this.files) {
-      view.setUint32(centralOffset, 0x02014b50, true);
-      centralOffset += 4;
-      view.setUint16(centralOffset, 0x0014, true); // version made by
-      centralOffset += 2;
-      view.setUint16(centralOffset, 20, true); // version needed to extract
-      centralOffset += 2;
-      view.setUint16(centralOffset, 0, true); // general purpose flag
-      centralOffset += 2;
-      view.setUint16(centralOffset, 0, true); // compression
-      centralOffset += 2;
-      view.setUint16(centralOffset, 0, true); // mod time
-      centralOffset += 2;
-      view.setUint16(centralOffset, 0, true); // mod date
-      centralOffset += 2;
-      view.setUint32(centralOffset, file.crc, true);
-      centralOffset += 4;
-      view.setUint32(centralOffset, file.data.length, true);
-      centralOffset += 4;
-      view.setUint32(centralOffset, file.data.length, true);
-      centralOffset += 4;
-      view.setUint16(centralOffset, file.nameBytes.length, true);
-      centralOffset += 2;
-      view.setUint16(centralOffset, 0, true); // extra field length
-      centralOffset += 2;
-      view.setUint16(centralOffset, 0, true); // comment length
-      centralOffset += 2;
-      view.setUint16(centralOffset, 0, true); // disk number start
-      centralOffset += 2;
-      view.setUint16(centralOffset, 0, true); // internal file attrs
-      centralOffset += 2;
-      view.setUint32(centralOffset, 0, true); // external file attrs
-      centralOffset += 4;
-      view.setUint32(centralOffset, file.localHeaderOffset, true);
-      centralOffset += 4;
-      output.set(file.nameBytes, centralOffset);
-      centralOffset += file.nameBytes.length;
+      const centralLength = 46 + file.nameBytes.length;
+      const centralBuffer = new ArrayBuffer(centralLength);
+      const centralView = new DataView(centralBuffer);
+
+      centralView.setUint32(0, 0x02014b50, true);
+      centralView.setUint16(4, 0x0014, true); // version made by
+      centralView.setUint16(6, 20, true); // version needed to extract
+      centralView.setUint16(8, 0, true); // general purpose flag
+      centralView.setUint16(10, 0, true); // compression
+      centralView.setUint16(12, 0, true); // mod time
+      centralView.setUint16(14, 0, true); // mod date
+      centralView.setUint32(16, file.crc, true);
+      centralView.setUint32(20, file.data.length, true);
+      centralView.setUint32(24, file.data.length, true);
+      centralView.setUint16(28, file.nameBytes.length, true);
+      centralView.setUint16(30, 0, true); // extra field length
+      centralView.setUint16(32, 0, true); // comment length
+      centralView.setUint16(34, 0, true); // disk number start
+      centralView.setUint16(36, 0, true); // internal attrs
+      centralView.setUint32(38, 0, true); // external attrs
+      centralView.setUint32(42, file.localHeaderOffset, true);
+
+      const centralBytes = new Uint8Array(centralBuffer);
+      centralBytes.set(file.nameBytes, 46);
+      parts.push(centralBytes);
+      centralDirectorySize += centralBytes.length;
+      offset += centralBytes.length;
     }
 
-    view.setUint32(centralOffset, 0x06054b50, true);
-    centralOffset += 4;
-    view.setUint16(centralOffset, 0, true); // number of this disk
-    centralOffset += 2;
-    view.setUint16(centralOffset, 0, true); // disk where central directory starts
-    centralOffset += 2;
-    view.setUint16(centralOffset, this.files.length, true); // records on this disk
-    centralOffset += 2;
-    view.setUint16(centralOffset, this.files.length, true); // total records
-    centralOffset += 2;
-    view.setUint32(centralOffset, centralDirectorySize, true);
-    centralOffset += 4;
-    view.setUint32(centralOffset, centralDirectoryOffset, true);
-    centralOffset += 4;
-    view.setUint16(centralOffset, 0, true); // comment length
+    const endBuffer = new ArrayBuffer(22);
+    const endView = new DataView(endBuffer);
+    endView.setUint32(0, 0x06054b50, true);
+    endView.setUint16(4, 0, true); // number of this disk
+    endView.setUint16(6, 0, true); // disk where central directory starts
+    endView.setUint16(8, this.files.length, true); // records on this disk
+    endView.setUint16(10, this.files.length, true); // total records
+    endView.setUint32(12, centralDirectorySize, true);
+    endView.setUint32(16, centralDirectoryOffset, true);
+    endView.setUint16(20, 0, true); // comment length
 
-    return output;
+    parts.push(new Uint8Array(endBuffer));
+
+    return new Blob(parts, { type: "application/epub+zip" });
   }
 }

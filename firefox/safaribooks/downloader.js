@@ -374,12 +374,14 @@ export class SafariBooksDownloader {
 
     this.log("Packaging EPUB zip contents...");
     const zipStart = Date.now();
-    const zipData = zip.generate();
+    const generated = zip.generate();
     const zipDuration = Date.now() - zipStart;
-    this.log(`EPUB archive generated in ${zipDuration}ms. Preparing download...`);
-    this.reportProgress("packaging-complete", { durationMs: zipDuration });
+    const blob = generated instanceof Blob ? generated : new Blob([generated], { type: "application/epub+zip" });
+    this.log(
+      `EPUB archive generated in ${zipDuration}ms (size: ${Math.round(blob.size / 1024)} KiB). Preparing download...`
+    );
+    this.reportProgress("packaging-complete", { durationMs: zipDuration, sizeBytes: blob.size });
 
-    const blob = new Blob([zipData], { type: "application/epub+zip" });
     const url = URL.createObjectURL(blob);
 
     const filename = `${this.cleanTitle}/${this.outputFileName}.epub`;
