@@ -49,7 +49,7 @@ function buildXhtml(pageCss, innerHtml, themeMode, includeKindleCss, extraThemeC
     `<!DOCTYPE html>
 <html lang="en" xml:lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.w3.org/2002/06/xhtml2/ http://www.w3.org/MarkUp/SCHEMA/xhtml2.xsd" xmlns:epub="http://www.idpf.org/2007/ops">
 <head>
-<meta charset="utf-8">
+<meta charset="utf-8" />
 ${pageCss}
 <style type="text/css">
 body{margin:1em;background-color:transparent!important;}
